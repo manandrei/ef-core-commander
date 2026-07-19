@@ -64,7 +64,8 @@
         {
           "type": "webview",
           "id": "ef-core-commander.panel",
-          "name": "Migrations"
+          "name": "Migrations",
+          "icon": "media/ef-core-commander-activity.png"
         }
       ]
     },
