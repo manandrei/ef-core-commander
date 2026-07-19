@@ -1,0 +1,30 @@
+name: Package VSIX
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: npm ci --prefix src/ef-core-commander
+      - run: npm test --prefix src/ef-core-commander
+      - name: Package VSIX
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cd src/ef-core-commander
+          npx --yes @vscode/vsce package --out "../../artifacts/ef-core-commander-${GITHUB_REF_NAME}.vsix"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ef-core-commander-vsix
+          path: artifacts/*.vsix

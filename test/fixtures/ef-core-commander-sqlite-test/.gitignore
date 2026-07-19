@@ -1,0 +1,5 @@
+bin/
+obj/
+ef-core-commander-test.db
+*.db-shm
+*.db-wal

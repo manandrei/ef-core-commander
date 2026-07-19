@@ -1,0 +1,105 @@
+{
+  "name": "ef-core-commander",
+  "displayName": "EF Core Commander",
+  "description": "Activity Bar panel for Entity Framework Core migrations and database commands.",
+  "version": "1.0.0",
+  "publisher": "manandrei",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manandrei/ef-core-commander.git",
+    "directory": "src/ef-core-commander"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:ef-core-commander.panel",
+    "onCommand:ef-core-commander.addMigration",
+    "onCommand:ef-core-commander.removeMigration",
+    "onCommand:ef-core-commander.generateSqlScript",
+    "onCommand:ef-core-commander.updateDatabase",
+    "onCommand:ef-core-commander.dropDatabase",
+    "onCommand:ef-core-commander.refreshWorkspace"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "typescript": "^5.4.5"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "EF Core Commander",
+      "properties": {
+        "ef-core-commander.dotnetPath": {
+          "type": "string",
+          "default": "dotnet",
+          "description": "Path to the dotnet executable used to run EF Core CLI commands."
+        },
+        "ef-core-commander.defaultBuildConfiguration": {
+          "type": "string",
+          "default": "Debug",
+          "description": "Default build configuration passed to dotnet ef."
+        },
+        "ef-core-commander.useNoBuildByDefault": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use --no-build by default for generated dotnet ef commands."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "ef-core-commander",
+          "title": "EF Core Commander",
+          "icon": "media/ef-core-commander.svg"
+        }
+      ]
+    },
+    "views": {
+      "ef-core-commander": [
+        {
+          "type": "webview",
+          "id": "ef-core-commander.panel",
+          "name": "Migrations"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "ef-core-commander.addMigration",
+        "title": "EF Core Commander: Add Migration"
+      },
+      {
+        "command": "ef-core-commander.removeMigration",
+        "title": "EF Core Commander: Remove Last Migration"
+      },
+      {
+        "command": "ef-core-commander.generateSqlScript",
+        "title": "EF Core Commander: Generate SQL Script"
+      },
+      {
+        "command": "ef-core-commander.updateDatabase",
+        "title": "EF Core Commander: Update Database"
+      },
+      {
+        "command": "ef-core-commander.dropDatabase",
+        "title": "EF Core Commander: Drop Database"
+      },
+      {
+        "command": "ef-core-commander.refreshWorkspace",
+        "title": "EF Core Commander: Refresh Workspace"
+      }
+    ]
+  }
+}

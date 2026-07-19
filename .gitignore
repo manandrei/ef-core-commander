@@ -1,0 +1,21 @@
+# Node / VS Code extension
+**/node_modules/
+src/ef-core-commander/out/
+src/ef-core-commander/*.vsix
+**/*.map
+.vscode-test/
+
+# .NET
+**/bin/
+**/obj/
+
+# SQLite fixture data
+test/fixtures/ef-core-commander-sqlite-test/*.db
+test/fixtures/ef-core-commander-sqlite-test/*.db-shm
+test/fixtures/ef-core-commander-sqlite-test/*.db-wal
+
+# Local tooling
+.idea/
+.vs/
+*.user
+*.suo

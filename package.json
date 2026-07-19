@@ -1,0 +1,11 @@
+{
+  "name": "ef-core-commander-workspace",
+  "private": true,
+  "description": "Development workspace for the EF Core Commander VS Code extension.",
+  "scripts": {
+    "test:extension": "npm --prefix src/ef-core-commander test",
+    "test:sqlite": "dotnet build test/fixtures/ef-core-commander-sqlite-test/EfCoreCommander.SqliteTest.csproj",
+    "test": "npm run test:extension && npm run test:sqlite",
+    "package:vsix": "cd src/ef-core-commander && npx --yes @vscode/vsce package"
+  }
+}
