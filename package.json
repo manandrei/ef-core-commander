@@ -7,6 +7,7 @@
     "test:sqlite": "dotnet build test/fixtures/ef-core-commander-sqlite-test/EfCoreCommander.SqliteTest.csproj",
     "test": "npm run test:extension && npm run test:sqlite",
     "package:vsix": "node scripts/package-vsix.js",
-    "pack": "npm run package:vsix"
+    "pack": "npm run package:vsix",
+    "publish": "node scripts/publish-vsix.js"
   }
 }
