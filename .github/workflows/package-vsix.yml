@@ -24,7 +24,7 @@ jobs:
           mkdir -p artifacts/vsix
           cd src/ef-core-commander
           npx --yes @vscode/vsce package --out "../../artifacts/vsix/ef-core-commander-${GITHUB_REF_NAME}.vsix"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ef-core-commander-vsix
           path: artifacts/vsix/*.vsix
