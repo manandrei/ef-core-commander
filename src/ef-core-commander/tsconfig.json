@@ -9,6 +9,9 @@
     ],
     "sourceMap": true,
     "rootDir": "src",
+    "types": [
+      "node"
+    ],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true
