@@ -5,6 +5,8 @@
   "version": "1.0.0",
   "publisher": "manandrei",
   "license": "MIT",
+  "homepage": "https://manandrei.ro",
+  "icon": "media/ef-core-commander.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/manandrei/ef-core-commander.git",
@@ -62,7 +64,7 @@
         {
           "id": "ef-core-commander",
           "title": "EF Core Commander",
-          "icon": "media/ef-core-commander.svg"
+          "icon": "media/ef-core-commander.png"
         }
       ]
     },

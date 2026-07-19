@@ -4,6 +4,7 @@ src/ef-core-commander/out/
 src/ef-core-commander/*.vsix
 **/*.map
 .vscode-test/
+artifacts/
 
 # .NET
 **/bin/

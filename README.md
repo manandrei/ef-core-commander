@@ -72,7 +72,7 @@ dotnet run --project test/fixtures/ef-core-commander-sqlite-test/EfCoreCommander
 npm run package:vsix
 ```
 
-The generated VSIX is written under `src/ef-core-commander` and is ignored by Git.
+The generated VSIX is written under `artifacts/vsix` and is ignored by Git.
 
 ## License
 

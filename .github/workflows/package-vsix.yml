@@ -21,10 +21,10 @@ jobs:
       - name: Package VSIX
         shell: bash
         run: |
-          mkdir -p artifacts
+          mkdir -p artifacts/vsix
           cd src/ef-core-commander
-          npx --yes @vscode/vsce package --out "../../artifacts/ef-core-commander-${GITHUB_REF_NAME}.vsix"
+          npx --yes @vscode/vsce package --out "../../artifacts/vsix/ef-core-commander-${GITHUB_REF_NAME}.vsix"
       - uses: actions/upload-artifact@v4
         with:
           name: ef-core-commander-vsix
-          path: artifacts/*.vsix
+          path: artifacts/vsix/*.vsix
