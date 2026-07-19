@@ -18,15 +18,6 @@
   "categories": [
     "Other"
   ],
-  "activationEvents": [
-    "onView:ef-core-commander.panel",
-    "onCommand:ef-core-commander.addMigration",
-    "onCommand:ef-core-commander.removeMigration",
-    "onCommand:ef-core-commander.generateSqlScript",
-    "onCommand:ef-core-commander.updateDatabase",
-    "onCommand:ef-core-commander.dropDatabase",
-    "onCommand:ef-core-commander.refreshWorkspace"
-  ],
   "main": "./out/extension.js",
   "scripts": {
     "compile": "tsc -p ./",
