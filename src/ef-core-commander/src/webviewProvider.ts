@@ -7,11 +7,17 @@ import { createExecutionSession, ExecutionHistoryStore, ExecutionLogStream, Exec
 import { FormState, WorkspaceCache } from "./workspaceCache";
 import { CommandOptions, DatabaseMigrationSelection, DatabaseMigrationStatus, EfOperation, WorkspaceModel } from "./types";
 
+const defaultHistoryRetentionDays = 7;
+const maxHistoryRetentionDays = 3650;
+
+type WebviewScreen = "form" | "execution" | "history";
+
 type WebviewMessage =
   | { type: "ready" }
   | { type: "refresh"; payload?: Partial<CommandOptions> }
   | { type: "checkDatabaseMigrations"; payload: Partial<CommandOptions> }
   | { type: "run"; payload: Partial<CommandOptions> }
+  | { type: "screenChanged"; screen: WebviewScreen }
   | { type: "history" }
   | { type: "historyEntry"; id: string }
   | { type: "deleteHistory"; id: string }
@@ -25,11 +31,15 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
   private databaseMigrationStatus?: DatabaseMigrationStatus;
   private activeSession?: ExecutionSession;
   private lastExecution?: ExecutionSession;
+  private viewedHistorySession?: ExecutionSession;
   private historyStore?: ExecutionHistoryStore;
   private persisted: FormState = {};
+  private activeScreen: WebviewScreen = "form";
+  private currentWorkspaceRoot?: string;
   private cache?: WorkspaceCache;
   private persistTimer?: NodeJS.Timeout;
   private refreshTimer?: NodeJS.Timeout;
+  private historyCleanupPromise?: Promise<void>;
   private workspaceWatcher?: vscode.FileSystemWatcher;
   private refreshQueue: Promise<void> = Promise.resolve();
   private initializePromise?: Promise<void>;
@@ -71,6 +81,8 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
 
   async runOperation(operation: EfOperation): Promise<void> {
     await vscode.commands.executeCommand("ef-core-commander.panel.focus");
+    this.activeScreen = "form";
+    this.viewedHistorySession = undefined;
     this.post({ type: "selectOperation", operation });
   }
 
@@ -95,10 +107,16 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    if (message.type === "history") { await this.postHistory(); return; }
-    if (message.type === "historyEntry") { await this.postHistoryEntry(message.id); return; }
-    if (message.type === "deleteHistory") { await this.historyStoreForCurrentWorkspace().delete(message.id); await this.postHistory(); return; }
+    if (message.type === "screenChanged") {
+      this.activeScreen = message.screen;
+      if (message.screen !== "execution") this.viewedHistorySession = undefined;
+      return;
+    }
+    if (message.type === "history") { this.activeScreen = "history"; await this.postHistory(); return; }
+    if (message.type === "historyEntry") { this.activeScreen = "history"; await this.postHistoryEntry(message.id); return; }
+    if (message.type === "deleteHistory") { this.activeScreen = "history"; await this.historyStoreForCurrentWorkspace().delete(message.id); await this.postHistory(); return; }
     if (message.type === "clearHistory") {
+      this.activeScreen = "history";
       await this.historyStoreForCurrentWorkspace().clear();
       this.lastExecution = undefined;
       this.postState();
@@ -107,7 +125,11 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     }
     if (message.type === "restoreLastExecution") {
       const session = this.activeSession || this.lastExecution;
-      if (session) this.post({ type: "executionRestored", session });
+      if (session) {
+        this.activeScreen = "execution";
+        this.viewedHistorySession = undefined;
+        this.post({ type: "executionRestored", session });
+      }
       return;
     }
 
@@ -119,17 +141,19 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
   private async initialize(): Promise<void> {
     const roots = vscode.workspace.workspaceFolders?.map(folder => folder.uri.fsPath) || [process.cwd()];
     const candidates = await Promise.all(roots.map(async root => {
-      const cache = new WorkspaceCache(path.join(root, ".vscode", "ef-core-commander"));
+      const cache = new WorkspaceCache(root);
       return { root, cache, form: await cache.loadForm(), model: await cache.loadModel() };
     }));
     const selected = candidates.find(candidate => {
       const project = candidate.form.migrationProjectPath;
       return typeof project === "string" && this.isPathInside(project, candidate.root);
     }) || candidates.find(candidate => Object.keys(candidate.form).length > 0) || candidates[0];
+    this.setCurrentWorkspaceRoot(selected.root);
     this.cache = selected.cache;
     const cachedModel = selected.model;
     this.persisted = selected.form;
     if (Object.keys(this.persisted).length === 0) this.persisted = this.context.workspaceState.get<FormState>("ef-core-commander.persisted", {});
+    void this.runHistoryCleanup();
     this.watchWorkspace();
     try { await this.refresh(false); }
     catch (error) {
@@ -173,6 +197,8 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     const session = createExecutionSession(options.operation, migrationProject.path, options.dbContextName);
     this.historyStore = this.historyStoreForProject(migrationProject.path, migrationProject.directory);
     this.activeSession = session;
+    this.activeScreen = "execution";
+    this.viewedHistorySession = undefined;
     this.post({ type: "executionStarted", operation: options.operation });
     try {
       if (options.operation === "generateSqlScript" && options.mariaDbCliCompatible) {
@@ -242,7 +268,7 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     const command = buildMigrationListCommand(options);
     const ownsSession = !existingSession;
     const session = existingSession || createExecutionSession("checkDatabaseMigrations", migrationProject.path, dbContextName);
-    if (ownsSession) { this.historyStore = this.historyStoreForProject(migrationProject.path, migrationProject.directory); this.activeSession = session; this.post({ type: "executionStarted", operation: "checkDatabaseMigrations" }); }
+    if (ownsSession) { this.historyStore = this.historyStoreForProject(migrationProject.path, migrationProject.directory); this.activeSession = session; this.activeScreen = "execution"; this.viewedHistorySession = undefined; this.post({ type: "executionStarted", operation: "checkDatabaseMigrations" }); }
     try {
       const output = await this.runLoggedCommand(command, migrationProject.directory);
       this.databaseMigrationStatus = parseDatabaseMigrationStatus(output, selection);
@@ -286,13 +312,24 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
 
   private historyStoreForProject(projectPath: string, fallbackDirectory: string): ExecutionHistoryStore {
     const workspaceDirectory = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(projectPath))?.uri.fsPath || fallbackDirectory;
-    return new ExecutionHistoryStore(path.join(workspaceDirectory, ".vscode", "ef-core-commander", "history"));
+    return new ExecutionHistoryStore(path.join(workspaceDirectory, ".vscode", "ef-core-commander", "history"), workspaceDirectory);
   }
 
   private selectCacheForProject(projectPath?: string): void {
     if (!projectPath) return;
     const workspaceDirectory = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(projectPath))?.uri.fsPath;
-    if (workspaceDirectory) this.cache = new WorkspaceCache(path.join(workspaceDirectory, ".vscode", "ef-core-commander"));
+    if (workspaceDirectory) {
+      this.setCurrentWorkspaceRoot(workspaceDirectory);
+      this.cache = new WorkspaceCache(workspaceDirectory);
+    }
+  }
+
+  private setCurrentWorkspaceRoot(workspaceRoot: string): void {
+    if (this.currentWorkspaceRoot && path.normalize(this.currentWorkspaceRoot) !== path.normalize(workspaceRoot)) {
+      this.activeScreen = "form";
+      this.viewedHistorySession = undefined;
+    }
+    this.currentWorkspaceRoot = workspaceRoot;
   }
 
   private isPathInside(candidatePath: string, rootPath: string): boolean {
@@ -303,7 +340,7 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
   private historyStoreForCurrentWorkspace(): ExecutionHistoryStore {
     const selectedPath = this.getPersistedValue("migrationProjectPath");
     const project = this.model?.projects.find(item => item.path === selectedPath) || this.model?.projects[0];
-    return this.historyStoreForProject(project?.path || "", project?.directory || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd());
+    return this.historyStoreForProject(project?.path || "", project?.directory || this.currentWorkspaceRoot || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd());
   }
 
   private async postHistory(): Promise<void> {
@@ -311,7 +348,12 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   private async postHistoryEntry(id: string): Promise<void> {
-    this.post({ type: "historyEntryData", session: await this.historyStoreForCurrentWorkspace().get(id) });
+    const session = await this.historyStoreForCurrentWorkspace().get(id);
+    if (session) {
+      this.viewedHistorySession = session;
+      this.activeScreen = "execution";
+    }
+    this.post({ type: "historyEntryData", session });
   }
 
   private toCommandOptions(payload: Partial<CommandOptions> | undefined, migrationProjectPath: string, dbContextName?: string): CommandOptions {
@@ -371,10 +413,14 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
 
     this.post({
       type: "state",
+      workspaceRoot: this.currentWorkspaceRoot,
+      activeScreen: this.activeScreen,
+      executionReturnScreen: this.activeScreen === "execution" && this.viewedHistorySession ? "history" : "form",
       model: this.model,
       defaults: this.getDefaults(),
       persisted: this.persisted,
-      lastExecution: this.activeSession || this.lastExecution,
+      historyCleanup: this.getHistoryCleanupSettings(),
+      lastExecution: this.activeSession || this.viewedHistorySession || this.lastExecution,
       databaseMigrationStatus: this.databaseMigrationStatus,
       targetMigrations: Object.fromEntries(this.model.projects.map(project => [
         project.path,
@@ -403,11 +449,43 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
   }
 
   private getDefaults(): { buildConfiguration: string; noBuild: boolean } {
-    const config = vscode.workspace.getConfiguration("ef-core-commander");
     return {
-      buildConfiguration: config.get<string>("defaultBuildConfiguration", "Debug"),
-      noBuild: config.get<boolean>("useNoBuildByDefault", false)
+      buildConfiguration: "Debug",
+      noBuild: false
     };
+  }
+
+  private getHistoryCleanupSettings(): { enabled: boolean; retentionDays: number } {
+    return {
+      enabled: this.persisted.historyAutoCleanupEnabled !== false,
+      retentionDays: normalizeHistoryRetentionDays(this.persisted.historyRetentionDays)
+    };
+  }
+
+  private async runHistoryCleanup(store?: ExecutionHistoryStore): Promise<void> {
+    if (this.historyCleanupPromise) return this.historyCleanupPromise;
+    this.historyCleanupPromise = this.performHistoryCleanup(store).finally(() => {
+      this.historyCleanupPromise = undefined;
+    });
+    return this.historyCleanupPromise;
+  }
+
+  private async performHistoryCleanup(store?: ExecutionHistoryStore): Promise<void> {
+    const settings = this.getHistoryCleanupSettings();
+    if (!settings.enabled) return;
+
+    try {
+      const result = await (store || this.historyStoreForCurrentWorkspace()).cleanup(settings.retentionDays);
+      if (result.deleted > 0) {
+        this.output.appendLine(`History cleanup removed ${result.deleted} item(s) older than ${settings.retentionDays} day(s).`);
+      }
+      if (result.failed > 0) {
+        this.output.appendLine(`History cleanup could not remove ${result.failed} expired item(s).`);
+      }
+    } catch (error) {
+      const message = redactSensitiveData(error instanceof Error ? error.message : String(error));
+      this.output.appendLine(`History cleanup failed: ${message}`);
+    }
   }
 
   private post(message: unknown): void {
@@ -461,8 +539,14 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     .spinner { display: inline-block; width: 12px; height: 12px; margin-right: 7px; border: 2px solid var(--vscode-descriptionForeground); border-right-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
     .spinner.hidden { display: none; }
     .history-list { overflow-y: auto; }
+    .history-settings { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; margin-bottom: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--vscode-input-border); }
+    .history-settings-main { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; min-width: 0; }
+    .history-retention { display: inline-flex; flex-direction: row; align-items: center; gap: 6px; margin: 0; white-space: nowrap; }
+    .history-retention input { width: 64px; min-width: 64px; }
+    .history-settings .check { margin-top: 0; }
+    .history-location { grid-column: 1 / -1; color: var(--vscode-descriptionForeground); font-size: 11px; overflow-wrap: anywhere; }
     .history-row { display: grid; grid-template-columns: 1fr auto auto; gap: 6px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--vscode-input-border); }
-    .history-row button, .history-actions button { width: auto; margin: 0; padding: 5px 8px; }
+    .history-row button, .history-actions button, .history-settings button { width: auto; margin: 0; padding: 5px 8px; }
     @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
@@ -522,7 +606,16 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     <button id="closeExecution" class="secondary" type="button" disabled><span class="button-icon" aria-hidden="true">×</span>Close</button>
   </section>
   <section id="historyPanel" class="history-panel hidden">
-    <div class="history-actions"><button id="closeHistory" class="secondary" type="button"><span class="button-icon" aria-hidden="true">×</span>Close</button><button id="clearHistory" class="secondary" type="button"><span class="button-icon" aria-hidden="true">⌫</span>Clear history</button></div>
+    <div class="history-actions"><button id="closeHistory" class="secondary" type="button"><span class="button-icon" aria-hidden="true">×</span>Close</button></div>
+    <h3>History settings</h3>
+    <div class="history-settings">
+      <div class="history-settings-main">
+        <div class="check"><input id="historyAutoCleanupEnabled" type="checkbox" checked><span>Automatic cleanup</span></div>
+        <label class="history-retention">Retention (days)<input id="historyRetentionDays" type="number" min="1" max="${maxHistoryRetentionDays}" value="${defaultHistoryRetentionDays}"></label>
+      </div>
+      <button id="clearHistory" class="secondary" type="button"><span class="button-icon" aria-hidden="true">⌫</span>Clear history</button>
+      <div class="history-location">Workspace: .vscode/ef-core-commander/history</div>
+    </div>
     <h3 id="historyTitle">History</h3>
     <div id="historyList" class="history-list"></div>
   </section>
@@ -536,23 +629,29 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
       ["dropDatabase", "Drop Database"]
     ];
     let state = undefined;
-    let screen = vscode.getState()?.screen || "form";
+    let screen = "form";
+    let executionReturnScreen = "form";
     let historySessions = [];
-    const ids = ["operation","migrationProject","startupProject","dbContext","buildConfigurationPreset","buildConfigurationCustom","targetFramework","creationMethod","noBuild","migrationName","outputDir","fromMigration","toMigration","scriptOutput","idempotent","noTransactions","mariaDbCliCompatible","targetMigration","useDefaultConnection","connection","connectionCustom","additionalArgs","wrapOutput"];
+    let historyRequested = false;
+    const ids = ["operation","migrationProject","startupProject","dbContext","buildConfigurationPreset","buildConfigurationCustom","targetFramework","creationMethod","noBuild","migrationName","outputDir","fromMigration","toMigration","scriptOutput","idempotent","noTransactions","mariaDbCliCompatible","targetMigration","useDefaultConnection","connection","connectionCustom","additionalArgs","wrapOutput","historyAutoCleanupEnabled","historyRetentionDays"];
     const el = Object.fromEntries(ids.map(id => [id, document.getElementById(id)]));
     Object.values(el).forEach(control => {
       control.addEventListener("change", persist);
       if (control.tagName === "INPUT" || control.tagName === "TEXTAREA") control.addEventListener("input", persist);
     });
     window.addEventListener("message", event => {
-      if (event.data.type === "state") { state = event.data; render(); }
-      if (event.data.type === "selectOperation") { el.operation.value = event.data.operation; updateVisibility(); }
-      if (event.data.type === "executionStarted") { document.getElementById("lastResult").disabled = false; screen = "execution"; saveViewState(); document.getElementById("executionLog").textContent = ""; document.getElementById("executionTitle").textContent = "Processing " + event.data.operation + "..."; document.getElementById("executionSpinner").classList.remove("hidden"); document.getElementById("closeExecution").disabled = true; applyScreen(); }
+      if (event.data.type === "state") {
+        state = event.data;
+        screen = state.activeScreen || "form";
+        render();
+      }
+      if (event.data.type === "selectOperation") { screen = "form"; el.operation.value = event.data.operation; updateVisibility(); applyScreen(); }
+      if (event.data.type === "executionStarted") { executionReturnScreen = "form"; document.getElementById("lastResult").disabled = false; screen = "execution"; document.getElementById("executionLog").textContent = ""; document.getElementById("executionTitle").textContent = "Processing " + event.data.operation + "..."; document.getElementById("executionSpinner").classList.remove("hidden"); document.getElementById("closeExecution").disabled = true; applyScreen(); }
       if (event.data.type === "executionLog") { const log = document.getElementById("executionLog"); log.textContent += event.data.text + (event.data.text.endsWith("\\n") ? "" : "\\n"); log.scrollTop = log.scrollHeight; }
       if (event.data.type === "executionCompleted") { document.getElementById("executionTitle").textContent = event.data.status === "succeeded" ? "Completed" : "Completed with errors"; document.getElementById("executionSpinner").classList.add("hidden"); document.getElementById("closeExecution").disabled = false; }
-      if (event.data.type === "executionRestored") { restoreExecution(event.data.session); }
-      if (event.data.type === "historyData") { historySessions = event.data.sessions; renderHistoryList(); }
-      if (event.data.type === "historyEntryData") { renderHistoryEntry(event.data.session); }
+      if (event.data.type === "executionRestored") { restoreExecution(event.data.session, "form"); }
+      if (event.data.type === "historyData") { historyRequested = false; historySessions = event.data.sessions; renderHistoryList(); }
+      if (event.data.type === "historyEntryData") { if (event.data.session) restoreExecution(event.data.session, "history"); }
     });
     document.getElementById("refresh").addEventListener("click", () => { persist(); vscode.postMessage({ type: "refresh", payload: collect() }); });
     document.getElementById("checkDatabaseMigrations").addEventListener("click", () => { persist(); vscode.postMessage({ type: "checkDatabaseMigrations", payload: collect() }); });
@@ -561,13 +660,13 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
       persist();
       vscode.postMessage({ type: "run", payload: collect() });
     });
-    document.getElementById("closeExecution").addEventListener("click", () => { screen = "form"; saveViewState(); applyScreen(); });
-    document.getElementById("closeHistory").addEventListener("click", () => { screen = "form"; saveViewState(); applyScreen(); });
+    document.getElementById("closeExecution").addEventListener("click", () => setScreen(executionReturnScreen));
+    document.getElementById("closeHistory").addEventListener("click", () => setScreen("form"));
     document.getElementById("clearHistory").addEventListener("click", () => vscode.postMessage({ type: "clearHistory" }));
     document.getElementById("lastResult").addEventListener("click", () => vscode.postMessage({ type: "restoreLastExecution" }));
     const historyButton = document.createElement("button");
     historyButton.id = "history"; historyButton.className = "secondary"; historyButton.type = "button"; historyButton.innerHTML = '<span class="button-icon" aria-hidden="true">◷</span>History';
-    historyButton.addEventListener("click", () => { screen = "history"; saveViewState(); applyScreen(); vscode.postMessage({ type: "history" }); });
+    historyButton.addEventListener("click", () => setScreen("history"));
     document.querySelector(".action-bar").appendChild(historyButton);
     ["migrationProject","startupProject","dbContext","buildConfigurationPreset","buildConfigurationCustom","targetFramework","creationMethod","noBuild","useDefaultConnection","connection","connectionCustom","additionalArgs"].forEach(id => {
       el[id].addEventListener("change", () => { persist(); renderDatabaseMigrationStatus(); });
@@ -577,6 +676,7 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     el.connection.addEventListener("change", updateConnectionVisibility);
     el.useDefaultConnection.addEventListener("change", updateConnectionVisibility);
     el.wrapOutput.addEventListener("change", updateOutputWrapping);
+    el.historyAutoCleanupEnabled.addEventListener("change", updateHistoryCleanupVisibility);
     el.operation.addEventListener("change", updateVisibility);
     el.migrationProject.addEventListener("change", () => { fillDependentFields(); persist(); renderDatabaseMigrationStatus(); });
     el.startupProject.addEventListener("change", () => { fillDependentFields(); persist(); renderDatabaseMigrationStatus(); });
@@ -603,6 +703,8 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
       el.idempotent.checked = Boolean(state.persisted.idempotent);
       el.noTransactions.checked = Boolean(state.persisted.noTransactions);
       el.wrapOutput.checked = state.persisted.wrapOutput !== false;
+      el.historyAutoCleanupEnabled.checked = state.historyCleanup.enabled;
+      el.historyRetentionDays.value = String(state.historyCleanup.retentionDays);
       document.getElementById("lastResult").disabled = !state.lastExecution;
       el.additionalArgs.value = state.persisted.additionalArgs || "";
       fillDependentFields();
@@ -611,10 +713,14 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
       updateConfigurationVisibility();
       updateConnectionVisibility();
       updateOutputWrapping();
+      updateHistoryCleanupVisibility();
       renderDatabaseMigrationStatus();
       if (screen === "execution" && !state.lastExecution) screen = "form";
-      if (screen === "execution" && state.lastExecution) restoreExecution(state.lastExecution);
-      else applyScreen();
+      if (screen === "execution" && state.lastExecution) restoreExecution(state.lastExecution, state.executionReturnScreen || "form");
+      else {
+        applyScreen();
+        if (screen === "history") requestHistory();
+      }
     }
     function fillDependentFields() {
       const project = state.model.projects.find(p => p.path === el.migrationProject.value);
@@ -641,17 +747,29 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
     function updateOutputWrapping() {
       document.getElementById("executionLog").classList.toggle("no-wrap", !el.wrapOutput.checked);
     }
+    function updateHistoryCleanupVisibility() {
+      el.historyRetentionDays.disabled = !el.historyAutoCleanupEnabled.checked;
+    }
     function applyScreen() {
       const hasProjects = state?.model?.projects?.length > 0;
       document.getElementById("form").classList.toggle("hidden", !hasProjects || screen !== "form");
       document.getElementById("execution").classList.toggle("hidden", screen !== "execution");
       document.getElementById("historyPanel").classList.toggle("hidden", screen !== "history");
     }
-    function saveViewState() {
-      vscode.setState({ screen, wrapOutput: el.wrapOutput.checked });
+    function requestHistory() {
+      if (historyRequested) return;
+      historyRequested = true;
+      vscode.postMessage({ type: "history" });
     }
-    function restoreExecution(session) {
+    function setScreen(nextScreen) {
+      screen = nextScreen;
+      vscode.postMessage({ type: "screenChanged", screen });
+      applyScreen();
+      if (screen === "history") requestHistory();
+    }
+    function restoreExecution(session, returnScreen) {
       if (!session) return;
+      executionReturnScreen = returnScreen || "form";
       screen = "execution";
       document.getElementById("lastResult").disabled = false;
       document.getElementById("executionLog").textContent = session.entries.map(entry => entry.text).join("\\n");
@@ -659,7 +777,6 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
       document.getElementById("executionSpinner").classList.toggle("hidden", session.status !== "running");
       document.getElementById("closeExecution").disabled = session.status === "running";
       updateOutputWrapping();
-      saveViewState();
       applyScreen();
       const log = document.getElementById("executionLog"); log.scrollTop = log.scrollHeight;
     }
@@ -674,13 +791,6 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
         const remove = document.createElement("button"); remove.type = "button"; remove.innerHTML = '<span class="button-icon" aria-hidden="true">⌫</span>Delete'; remove.addEventListener("click", () => vscode.postMessage({ type: "deleteHistory", id: session.id }));
         row.append(label, view, remove); list.appendChild(row);
       }
-    }
-    function renderHistoryEntry(session) {
-      const list = document.getElementById("historyList"); list.textContent = "";
-      document.getElementById("historyTitle").textContent = session ? "History: " + session.operation : "History entry not found";
-      if (!session) return;
-      const log = document.createElement("pre"); log.className = "execution-log";
-      log.textContent = session.entries.map(entry => "[" + entry.timestamp + "] " + entry.text).join("\\n"); list.appendChild(log);
     }
     function setBuildConfiguration(value) {
       if (value === "Debug" || value === "Release") {
@@ -717,6 +827,11 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
         return el.connectionCustom.value.trim();
       }
       return el.connection.value;
+    }
+    function getHistoryRetentionDays() {
+      const parsed = Number.parseInt(el.historyRetentionDays.value, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) return "${defaultHistoryRetentionDays}";
+      return String(Math.min(parsed, ${maxHistoryRetentionDays}));
     }
     function updateConnectionVisibility() {
       const useCustom = !el.useDefaultConnection.checked && el.connection.value === "Custom";
@@ -772,6 +887,8 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
         connection: getConnection(),
         connectionName: !el.useDefaultConnection.checked && el.connection.value !== "Custom" ? el.connection.options[el.connection.selectedIndex]?.text : "",
         useDefaultConnection: el.useDefaultConnection.checked,
+        historyAutoCleanupEnabled: el.historyAutoCleanupEnabled.checked,
+        historyRetentionDays: getHistoryRetentionDays(),
         additionalArgs: el.additionalArgs.value
       };
     }
@@ -797,4 +914,11 @@ export class EfCoreWebviewProvider implements vscode.WebviewViewProvider {
 </body>
 </html>`;
   }
+}
+
+function normalizeHistoryRetentionDays(value: string | boolean | undefined): number {
+  if (typeof value !== "string") return defaultHistoryRetentionDays;
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return defaultHistoryRetentionDays;
+  return Math.min(parsed, maxHistoryRetentionDays);
 }

@@ -2,7 +2,7 @@
   "name": "ef-core-commander",
   "displayName": "EF Core Commander",
   "description": "Activity Bar panel for Entity Framework Core migrations and database commands.",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "publisher": "manandrei",
   "license": "MIT",
   "homepage": "https://manandrei.ro",
@@ -37,16 +37,6 @@
           "type": "string",
           "default": "dotnet",
           "description": "Path to the dotnet executable used to run EF Core CLI commands."
-        },
-        "ef-core-commander.defaultBuildConfiguration": {
-          "type": "string",
-          "default": "Debug",
-          "description": "Default build configuration passed to dotnet ef."
-        },
-        "ef-core-commander.useNoBuildByDefault": {
-          "type": "boolean",
-          "default": false,
-          "description": "Use --no-build by default for generated dotnet ef commands."
         }
       }
     },

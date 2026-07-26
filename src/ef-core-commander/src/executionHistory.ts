@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 import { atomicWriteFile } from "./fileStorage";
+import { fromPortablePath, toPortablePath } from "./workspaceCache";
 
 export type ExecutionStatus = "running" | "succeeded" | "failed";
 export type ExecutionLogStream = "system" | "stdout" | "stderr";
@@ -26,10 +27,17 @@ export interface ExecutionSessionSummary extends Omit<ExecutionSession, "entries
   fileName: string;
 }
 
-export class ExecutionHistoryStore {
-  private readonly indexFileName = "history-index.json";
+export interface HistoryCleanupResult {
+  deleted: number;
+  retained: number;
+  failed: number;
+}
 
-  constructor(private readonly directory: string) {}
+export class ExecutionHistoryStore {
+  private readonly legacyIndexFileName = "history-index.json";
+  private readonly millisecondsPerDay = 24 * 60 * 60 * 1000;
+
+  constructor(private readonly directory: string, private readonly workspaceRoot?: string) {}
 
   async save(session: ExecutionSession): Promise<void> {
     await fs.mkdir(this.directory, { recursive: true });
@@ -40,23 +48,18 @@ export class ExecutionHistoryStore {
       await atomicWriteFile(gitIgnore, "*\n");
     }
     const fileName = this.fileName(session);
-    await atomicWriteFile(path.join(this.directory, fileName), JSON.stringify(session, null, 2));
-    const sessions = (await this.loadIndex()).filter(item => item.id !== session.id);
-    sessions.push({ ...withoutEntries(session), fileName });
-    await this.saveIndex(sessions);
+    await atomicWriteFile(path.join(this.directory, fileName), JSON.stringify(this.toPortableSession(session), null, 2));
   }
 
   async list(): Promise<ExecutionSessionSummary[]> {
     try {
-      const indexed = await this.loadIndex();
-      if (indexed.length > 0) return indexed.sort((left, right) => right.startedAt.localeCompare(left.startedAt));
       const files = await fs.readdir(this.directory);
-      const sessions = await Promise.all(files.filter(file => file.endsWith(".json") && file !== this.indexFileName).map(async file => {
+      await this.migrateHistoryFiles(files);
+      const sessions = await Promise.all(this.sessionFiles(files).map(async file => {
         const session = await this.read(file);
         return session && { ...withoutEntries(session), fileName: file };
       }));
       const valid = sessions.filter((session): session is ExecutionSessionSummary => Boolean(session));
-      if (valid.length > 0) await this.saveIndex(valid);
       return valid.sort((left, right) => right.startedAt.localeCompare(left.startedAt));
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
@@ -78,7 +81,6 @@ export class ExecutionHistoryStore {
     const sessions = await this.list();
     const summary = sessions.find(item => item.id === id);
     if (summary) await fs.rm(path.join(this.directory, summary.fileName), { force: true });
-    await this.saveIndex(sessions.filter(item => item.id !== id));
   }
 
   async clear(): Promise<void> {
@@ -90,10 +92,38 @@ export class ExecutionHistoryStore {
     }
   }
 
+  async cleanup(retentionDays: number, now = new Date()): Promise<HistoryCleanupResult> {
+    await this.deleteLegacyIndex();
+    const days = Math.max(1, Math.floor(retentionDays));
+    const cutoff = now.getTime() - days * this.millisecondsPerDay;
+    const sessions = await this.list();
+    const retained: ExecutionSessionSummary[] = [];
+    let deleted = 0;
+    let failed = 0;
+
+    for (const session of sessions) {
+      const startedAt = Date.parse(session.startedAt);
+      if (!Number.isFinite(startedAt) || startedAt >= cutoff) {
+        retained.push(session);
+        continue;
+      }
+
+      try {
+        await fs.rm(path.join(this.directory, session.fileName), { force: true });
+        deleted += 1;
+      } catch {
+        retained.push(session);
+        failed += 1;
+      }
+    }
+
+    return { deleted, retained: retained.length, failed };
+  }
+
   private async read(fileName: string): Promise<ExecutionSession | undefined> {
     try {
       const value = JSON.parse(await fs.readFile(path.join(this.directory, fileName), "utf8")) as ExecutionSession;
-      return value.id && value.entries && value.startedAt ? value : undefined;
+      return value.id && value.entries && value.startedAt ? this.fromPortableSession(value) : undefined;
     } catch {
       return undefined;
     }
@@ -103,19 +133,39 @@ export class ExecutionHistoryStore {
     return `${session.startedAt.replace(/[:.]/g, "-")}-${session.operation}-${session.id}.json`;
   }
 
-  private async loadIndex(): Promise<ExecutionSessionSummary[]> {
-    try {
-      const value = JSON.parse(await fs.readFile(path.join(this.directory, this.indexFileName), "utf8"));
-      return Array.isArray(value) ? value.filter(item => item?.id && item?.fileName && item?.startedAt) : [];
-    } catch {
-      return [];
-    }
+  private async migrateHistoryFiles(files: string[]): Promise<void> {
+    if (!this.workspaceRoot) return;
+    await Promise.all(this.sessionFiles(files).map(async file => {
+      const filePath = path.join(this.directory, file);
+      try {
+        const value = JSON.parse(await fs.readFile(filePath, "utf8")) as ExecutionSession;
+        if (!value.id || !value.entries || !value.startedAt || typeof value.projectPath !== "string") return;
+        const portable = this.toPortableSession(value);
+        if (portable.projectPath !== value.projectPath) {
+          await atomicWriteFile(filePath, JSON.stringify(portable, null, 2));
+        }
+      } catch {
+        return;
+      }
+    }));
   }
 
-  private async saveIndex(sessions: ExecutionSessionSummary[]): Promise<void> {
-    await fs.mkdir(this.directory, { recursive: true });
-    await atomicWriteFile(path.join(this.directory, this.indexFileName), JSON.stringify(sessions, null, 2));
+  private sessionFiles(files: string[]): string[] {
+    return files.filter(file => file.endsWith(".json") && file !== this.legacyIndexFileName);
   }
+
+  private async deleteLegacyIndex(): Promise<void> {
+    await fs.rm(path.join(this.directory, this.legacyIndexFileName), { force: true }).catch(() => undefined);
+  }
+
+  private toPortableSession(session: ExecutionSession): ExecutionSession {
+    return { ...session, projectPath: toPortablePath(session.projectPath, this.workspaceRoot) };
+  }
+
+  private fromPortableSession(session: ExecutionSession): ExecutionSession {
+    return { ...session, projectPath: this.workspaceRoot ? fromPortablePath(session.projectPath, this.workspaceRoot) : session.projectPath };
+  }
+
 }
 
 export function redactSensitiveData(value: string): string {

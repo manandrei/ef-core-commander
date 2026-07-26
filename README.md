@@ -18,7 +18,7 @@ EF Core Commander can:
 - refresh the detected workspace model when project or source files change;
 - show the latest applied migration and pending migrations when the database status can be determined;
 - stream command output and errors in the extension panel;
-- keep local execution history and restore the last completed execution;
+- keep workspace-local execution history, restore the last completed execution and remove expired history automatically;
 - redact connection-string secrets from stored execution history and avoid persisting custom connection-string values;
 - generate SQL that is compatible with MariaDB CLI workflows when that option is selected.
 
@@ -26,11 +26,11 @@ The extension invokes the .NET Entity Framework Core CLI installed in the user's
 
 ## Configuration
 
-The following VS Code settings are available under `EF Core Commander`:
+The following VS Code setting is available under `EF Core Commander`:
 
-- `ef-core-commander.dotnetPath` — path to the `dotnet` executable, defaulting to `dotnet`;
-- `ef-core-commander.defaultBuildConfiguration` — default build configuration, defaulting to `Debug`;
-- `ef-core-commander.useNoBuildByDefault` — whether generated commands use `--no-build` by default.
+- `ef-core-commander.dotnetPath` — path to the `dotnet` executable, defaulting to `dotnet`.
+
+Form selections, workspace cache, execution history and history retention settings are stored inside the current workspace under `.vscode/ef-core-commander`. History cleanup is enabled by default with a 7-day retention period and can be changed from the extension's History panel. See [History and settings](docs/history-and-settings.md) for storage paths, retention examples and manual cleanup options.
 
 ## Repository layout
 
@@ -38,6 +38,10 @@ The following VS Code settings are available under `EF Core Commander`:
 - `test/fixtures/ef-core-commander-sqlite-test` — small EF Core 10 + SQLite workspace used to verify EF CLI commands from the extension.
 - `docs` — architecture, development, testing and release documentation.
 - `.github` — CI, VSIX packaging, dependency updates and contribution templates.
+
+## Changelog
+
+Extension release notes are tracked in [src/ef-core-commander/CHANGELOG.md](src/ef-core-commander/CHANGELOG.md).
 
 ## Requirements
 
