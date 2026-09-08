@@ -13,7 +13,7 @@
     "directory": "src/ef-core-commander"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.136.0"
   },
   "categories": [
     "Other"
